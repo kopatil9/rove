@@ -284,10 +284,21 @@ if (!text.trim()) {
   throw new Error('No AI text returned')
 }
 
+// 🔥 clean markdown wrappers + weird formatting
+const clean = text
+  .replace(/```json/gi, '')
+  .replace(/```/g, '')
+  .trim()
+
+console.log('CLEANED AI TEXT:', clean)
+
 try {
-  return JSON.parse(text)
+  return JSON.parse(clean)
 } catch (err) {
-  throw new Error(`AI returned invalid JSON. Check console log "SUPABASE AI RESPONSE". ${err.message}`)
+  console.error('FAILED TO PARSE:', clean)
+  throw new Error(
+    `AI returned invalid JSON. Check console log "FAILED TO PARSE". ${err.message}`
+  )
 }
 }
 
@@ -1606,7 +1617,7 @@ function RoveApp({ session }) {
                         <div style={{ width: 44, height: 44, borderRadius: 14, background: 'rgba(255,255,255,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}>✨</div>
                         <div>
                           <div style={{ fontFamily: T.ffBlack, fontSize: 17, fontWeight: 900, color: '#fff', letterSpacing: '-0.02em' }}>Generate with AI</div>
-                          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', fontWeight: 300 }}>Describe a trip and Claude builds your itinerary</div>
+                          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', fontWeight: 300 }}>Describe a trip and Rove builds your itinerary</div>
                         </div>
                       </div>
                       {generateError ? <div style={{ background: 'rgba(198,59,34,0.15)', border: '1px solid rgba(198,59,34,0.3)', borderRadius: T.radius, padding: '10px 12px', fontSize: 12, color: '#ff8f80', marginBottom: 12 }}>{generateError}</div> : null}
