@@ -214,13 +214,188 @@ function normalizeAiTrip(result) {
   }
 }
 
+function sanitizeAiJsonText(text) {
+  return String(text || '')
+    .replace(/^\uFEFF/, '')
+    .replace(/```json/gi, '')
+    .replace(/```/g, '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, '-')
+    .replace(/\r/g, '')
+    .trim()
+}
+
+function stripToFirstJsonObject(text) {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start === -1 || end === -1 || end <= start) return text
+  return text.slice(start, end + 1)
+}
+
+function removeTrailingCommas(text) {
+  return text.replace(/,\s*([}\]])/g, '$1')
+}
+
+function extractBalancedJsonObject(text) {
+  const start = text.indexOf('{')
+  if (start === -1) return text
+
+  let inString = false
+  let escape = false
+  let depth = 0
+
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i]
+
+    if (inString) {
+      if (escape) {
+        escape = false
+      } else if (ch === '\\') {
+        escape = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+
+    if (ch === '{') depth += 1
+    if (ch === '}') {
+      depth -= 1
+      if (depth === 0) {
+        return text.slice(start, i + 1)
+      }
+    }
+  }
+
+  return text.slice(start)
+}
+
+function salvageTruncatedJson(text) {
+  const start = text.indexOf('{')
+  if (start === -1) return text
+
+  let inString = false
+  let escape = false
+  const closers = []
+  let lastSafeIndex = -1
+  let closersAtLastSafe = []
+
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i]
+
+    if (inString) {
+      if (escape) {
+        escape = false
+      } else if (ch === '\\') {
+        escape = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+
+    if (ch === '{') closers.push('}')
+    else if (ch === '[') closers.push(']')
+    else if ((ch === '}' || ch === ']') && closers.length) closers.pop()
+
+    if (ch === '}' || ch === ']' || ch === ',') {
+      lastSafeIndex = i
+      closersAtLastSafe = [...closers]
+    }
+  }
+
+  if (lastSafeIndex === -1) return text
+
+  let candidate = text.slice(start, lastSafeIndex + 1)
+
+  if (candidate.endsWith(',')) {
+    candidate = candidate.slice(0, -1)
+  }
+
+  candidate = candidate + closersAtLastSafe.slice().reverse().join('')
+  return candidate
+}
+
+function tryParseJson(text) {
+  return JSON.parse(text)
+}
+
+function parseItineraryJson(rawText) {
+  const original = sanitizeAiJsonText(rawText)
+  const candidates = []
+
+  const base = stripToFirstJsonObject(original)
+  candidates.push(base)
+  candidates.push(removeTrailingCommas(base))
+  candidates.push(extractBalancedJsonObject(base))
+  candidates.push(removeTrailingCommas(extractBalancedJsonObject(base)))
+  candidates.push(salvageTruncatedJson(base))
+  candidates.push(removeTrailingCommas(salvageTruncatedJson(base)))
+
+  let lastError = null
+
+  for (const candidate of candidates) {
+    try {
+      return tryParseJson(candidate)
+    } catch (err) {
+      lastError = err
+    }
+  }
+
+  console.error('UNPARSEABLE AI JSON:', original)
+  throw new Error(`Unparseable AI JSON. ${lastError?.message || 'Unknown parse error'}`)
+}
+
+function normalizeAiTrip(parsed) {
+  const safeDays = Array.isArray(parsed?.days) ? parsed.days : []
+
+  return {
+    title: String(parsed?.title || 'AI Generated Trip'),
+    city: String(parsed?.city || ''),
+    country: String(parsed?.country || ''),
+    duration: Number(parsed?.duration) > 0 ? Number(parsed.duration) : Math.max(safeDays.length, 1),
+    vibe: VIBES.includes(parsed?.vibe) ? parsed.vibe : 'city break',
+    caption: String(parsed?.caption || ''),
+    days: safeDays.map((day, dayIndex) => ({
+      title: String(day?.title || `Day ${dayIndex + 1}`),
+      items: (Array.isArray(day?.items) ? day.items : [])
+        .filter(Boolean)
+        .map((item) => ({
+          category: ['Restaurant', 'Cafe', 'Bar', 'Activity', 'Sight', 'Hotel', 'Other'].includes(item?.category)
+            ? item.category
+            : 'Other',
+          name: String(item?.name || ''),
+          note: String(item?.note || ''),
+          timeText: String(item?.timeText || ''),
+          spend: item?.spend != null ? String(item.spend) : '',
+          url: String(item?.url || ''),
+          lat: item?.lat ?? null,
+          lng: item?.lng ?? null,
+        }))
+        .filter((item) => item.name || item.note),
+    })).filter((day) => day.items.length > 0),
+  }
+}
+
 async function callAnthropicForItinerary(prompt, publicTrips = []) {
   const contextTrips = publicTrips.slice(0, 4).map((t) => {
     return `Trip: ${t.title || 'Untitled'} in ${t.city || ''}, ${t.country || ''} (${t.duration || 1} days, vibe: ${t.vibe || 'trip'}). Caption: ${t.caption || 'none'}.`
   }).join('\n')
 
-  const systemPrompt = `You are Rove, a travel planning assistant. Generate a detailed day-by-day itinerary based on the user's request.
+ const systemPrompt = `You are Rove, a travel planning assistant. Generate a detailed day-by-day itinerary based on the user's request.
 ${contextTrips ? `\nHere are some popular public trips from the community for inspiration:\n${contextTrips}\n` : ''}
+
 Return ONLY valid JSON in this exact shape:
 {
   "title": "Trip title",
@@ -244,6 +419,7 @@ Return ONLY valid JSON in this exact shape:
     }
   ]
 }
+
 Keep every note very short.
 Do not use quotation marks inside any string values.
 Keep all note fields under 60 characters.
@@ -253,7 +429,9 @@ Include 3-4 items per day. Make it specific, realistic, and exciting.
 Return raw JSON only.
 Do not use markdown fences.
 Do not add commentary before or after the JSON.
-All string values must use standard double quotes.`
+All string values must use standard double quotes.
+Escape any quotes inside strings.
+`
 
   const response = await fetch(
     `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-itinerary`,
@@ -276,30 +454,20 @@ All string values must use standard double quotes.`
     throw new Error(`Generate function error: ${response.status} - ${errText}`)
   }
 
-  const data = await response.json()
+ const data = await response.json()
 console.log('SUPABASE AI RESPONSE:', data)
 
-const text = data.raw_text || ''
+const text =
+  data.raw_text ||
+  data.content?.find((b) => b.type === 'text')?.text ||
+  ''
+
 if (!text.trim()) {
   throw new Error('No AI text returned')
 }
 
-// 🔥 clean markdown wrappers + weird formatting
-const clean = text
-  .replace(/```json/gi, '')
-  .replace(/```/g, '')
-  .trim()
-
-console.log('CLEANED AI TEXT:', clean)
-
-try {
-  return JSON.parse(clean)
-} catch (err) {
-  console.error('FAILED TO PARSE:', clean)
-  throw new Error(
-    `AI returned invalid JSON. Check console log "FAILED TO PARSE". ${err.message}`
-  )
-}
+const parsed = parseItineraryJson(text)
+return normalizeAiTrip(parsed)
 }
 
 // ─── UI Primitives ───────────────────────────────────────────────────────────
